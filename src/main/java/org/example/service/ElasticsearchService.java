@@ -21,17 +21,40 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import org.elasticsearch.action.bulk.BulkRequest;
+import org.elasticsearch.action.bulk.BulkResponse;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.TimeUnit;
+import java.time.Instant;
 
-public class ElasticsearchService {
+public class ElasticsearchService implements AutoCloseable {
     private final RestHighLevelClient client;
     private final Map<String, String> aliasCache;
     private final Map<String, Integer> indexCounters;
     private static final String INDEX_PREFIX = "prd_a_";
+    
+    // Batch configuration
+    private static final int DEFAULT_BATCH_SIZE = 1000;
+    private static final long DEFAULT_FLUSH_INTERVAL_MS = 5000; // 5 seconds
+    private final int batchSize;
+    private final long flushIntervalMs;
+    private final BulkRequest currentBatch;
+    private final AtomicInteger batchCount;
+    private volatile Instant lastFlushTime;
 
     public ElasticsearchService(RestHighLevelClient client) {
+        this(client, DEFAULT_BATCH_SIZE, DEFAULT_FLUSH_INTERVAL_MS);
+    }
+
+    public ElasticsearchService(RestHighLevelClient client, int batchSize, long flushIntervalMs) {
         this.client = client;
         this.aliasCache = new ConcurrentHashMap<>();
         this.indexCounters = new ConcurrentHashMap<>();
+        this.batchSize = batchSize;
+        this.flushIntervalMs = flushIntervalMs;
+        this.currentBatch = new BulkRequest();
+        this.batchCount = new AtomicInteger(0);
+        this.lastFlushTime = Instant.now();
         initializeAliasCache();
     }
 
@@ -51,30 +74,31 @@ public class ElasticsearchService {
     }
 
     public void processSinkRecords(Collection<SinkRecord> records) {
-        for (SinkRecord record : records) {
-            try {
+        try {
+            for (SinkRecord record : records) {
                 if (record.value() != null) {
-                    indexDocument(record.value().toString());
+                    addToBatch(record.value().toString());
                 }
-            } catch (Exception e) {
-                System.err.println("Error processing record: " + e.getMessage());
-                // You might want to implement your error handling strategy here
             }
+            // Flush any remaining records in the batch
+            flushBatch();
+        } catch (Exception e) {
+            System.err.println("Error processing batch: " + e.getMessage());
+            throw new RuntimeException("Failed to process batch", e);
         }
     }
 
-    public void indexDocument(String message) throws IOException {
+    private void addToBatch(String message) throws IOException {
         ObjectMapper mapper = new ObjectMapper();
         try {
             JsonNode jsonNodes = mapper.readTree(message);
             
             if (jsonNodes.isArray()) {
-                System.out.println("Processing batch of " + jsonNodes.size() + " records");
                 for (JsonNode node : jsonNodes) {
-                    indexSingleDocument(node);
+                    addDocumentToBatch(node);
                 }
             } else {
-                indexSingleDocument(jsonNodes);
+                addDocumentToBatch(jsonNodes);
             }
         } catch (JsonParseException e) {
             System.err.println("Invalid JSON message: " + message);
@@ -82,21 +106,79 @@ public class ElasticsearchService {
         }
     }
 
-    private void indexSingleDocument(JsonNode node) throws IOException {
+    private boolean shouldFlush() {
+        return batchCount.get() >= batchSize || 
+               Instant.now().isAfter(lastFlushTime.plusMillis(flushIntervalMs));
+    }
+
+    private void addDocumentToBatch(JsonNode node) throws IOException {
         String productType = node.has("ProductType") ?
                 node.get("ProductType").asText().toLowerCase() : "unknown";
         String aliasName = getAliasName(productType);
 
-        System.out.println("Using alias name: " + aliasName + " for item: " + node.toString());
         ensureIndexAndAliasExist(productType);
 
         IndexRequest indexRequest = new IndexRequest(aliasName, "_doc")
                 .id(UUID.randomUUID().toString())
                 .source(node.toString(), XContentType.JSON);
 
-        IndexResponse response = client.index(indexRequest, RequestOptions.DEFAULT);
-        System.out.printf("Document indexed - ID: %s, Result: %s%n",
-                response.getId(), response.getResult().name());
+        currentBatch.add(indexRequest);
+        batchCount.incrementAndGet();
+
+        if (shouldFlush()) {
+            flushBatch();
+        }
+    }
+
+    private synchronized void flushBatch() throws IOException {
+        if (batchCount.get() > 0) {
+            try {
+                BulkResponse bulkResponse = client.bulk(currentBatch, RequestOptions.DEFAULT);
+                if (bulkResponse.hasFailures()) {
+                    System.err.println("Bulk indexing has failures: " + bulkResponse.buildFailureMessage());
+                }
+                long timeTaken = bulkResponse.getTook().getMillis();
+                System.out.printf("Indexed batch of %d documents in %d ms (%.2f docs/sec)%n", 
+                    batchCount.get(), timeTaken, 
+                    (batchCount.get() * 1000.0) / timeTaken);
+                
+                // Clear the batch
+                currentBatch.requests().clear();
+                batchCount.set(0);
+                lastFlushTime = Instant.now();
+            } catch (Exception e) {
+                System.err.println("Error flushing batch: " + e.getMessage());
+                throw new IOException("Failed to flush batch", e);
+            }
+        }
+    }
+
+    // Schedule periodic flush (optional, can be called in constructor if needed)
+    public void startPeriodicFlush() {
+        Thread flushThread = new Thread(() -> {
+            while (!Thread.currentThread().isInterrupted()) {
+                try {
+                    if (Instant.now().isAfter(lastFlushTime.plusMillis(flushIntervalMs))) {
+                        flushBatch();
+                    }
+                    Thread.sleep(Math.min(1000, flushIntervalMs / 2));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                } catch (Exception e) {
+                    System.err.println("Error in periodic flush: " + e.getMessage());
+                }
+            }
+        });
+        flushThread.setDaemon(true);
+        flushThread.setName("ES-Batch-Flush-Thread");
+        flushThread.start();
+    }
+
+    // For backward compatibility and single document indexing
+    public void indexDocument(String message) throws IOException {
+        addToBatch(message);
+        flushBatch(); // Immediately flush for single document indexing
     }
 
     private void initializeAliasCache() {
@@ -242,9 +324,14 @@ public class ElasticsearchService {
         }
     }
 
+    @Override
     public void close() throws IOException {
-        if (client != null) {
-            client.close();
+        try {
+            flushBatch(); // Ensure any remaining documents are flushed
+        } finally {
+            if (client != null) {
+                client.close();
+            }
         }
     }
 }
