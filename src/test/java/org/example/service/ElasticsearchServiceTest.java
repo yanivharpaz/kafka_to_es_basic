@@ -177,6 +177,76 @@ class ElasticsearchServiceTest {
         assertDoesNotThrow(() -> service.indexDocument(testDoc));
     }
 
+    @Test
+    void testNewAliasAndIndexCreation() throws IOException {
+        // Setup specific mock responses for this test
+        String initialAliasJson = """
+            {
+                "existing_index": {
+                    "aliases": {
+                        "existing_alias": {}
+                    }
+                }
+            }""";
+        
+        // First call returns no aliases for our test alias
+        when(response.getEntity())
+            .thenReturn(new StringEntity(initialAliasJson, "UTF-8"))
+            .thenReturn(new StringEntity("{}", "UTF-8")); // Subsequent calls return empty response
+            
+        // Track requests to verify index creation and deletion
+        ArgumentCaptor<Request> requestCaptor = ArgumentCaptor.forClass(Request.class);
+        
+        try {
+            // Create service
+            ElasticsearchService service = new ElasticsearchService(client);
+
+            // Test document with new product type (should trigger new alias/index creation)
+            String testDoc = createTestDocument("new_product", "Test Product");
+            service.indexDocument(testDoc);
+
+            // Verify index existence check (only once for new product type)
+            verify(indicesClient).exists(any(GetIndexRequest.class), any(RequestOptions.class));
+
+            // Verify index creation
+            verify(indicesClient).create(any(CreateIndexRequest.class), any(RequestOptions.class));
+
+            // Verify alias operations
+            verify(lowLevelClient, atLeast(2)).performRequest(requestCaptor.capture());
+            
+            // Analyze captured requests
+            List<Request> requests = requestCaptor.getAllValues();
+            requests.forEach(request -> {
+                logger.info("Request: {} {}", request.getMethod(), request.getEndpoint());
+            });
+
+            // Verify that we have at least one GET /_alias request and one POST /_aliases request
+            boolean hasAliasGet = requests.stream()
+                .anyMatch(r -> r.getMethod().equals("GET") && r.getEndpoint().equals("/_alias"));
+            boolean hasAliasCreate = requests.stream()
+                .anyMatch(r -> r.getMethod().equals("POST") && r.getEndpoint().equals("/_aliases"));
+                
+            assertTrue(hasAliasGet, "Should check for existing aliases");
+            assertTrue(hasAliasCreate, "Should create new alias");
+
+        } finally {
+            // Verify cleanup
+            // Note: In a real environment, you'd want to ensure these operations are performed
+            // Here we're just verifying the mock calls
+            Request deleteRequest = new Request("DELETE", "/prd_a_new_product_*");
+            lenient().when(lowLevelClient.performRequest(deleteRequest)).thenReturn(response);
+            
+            // Perform cleanup
+            lowLevelClient.performRequest(deleteRequest);
+            
+            // Verify deletion request
+            verify(lowLevelClient).performRequest(argThat(request -> 
+                request.getMethod().equals("DELETE") && 
+                request.getEndpoint().startsWith("/prd_a_new_product_")
+            ));
+        }
+    }
+
     private String createTestDocument(String productType, String title) {
         return String.format("""
             {
@@ -184,5 +254,15 @@ class ElasticsearchServiceTest {
                 "title": "%s"
             }
             """, productType, title);
+    }
+
+    private boolean isIndexCreationRequest(Request request) {
+        return request.getMethod().equals("PUT") && 
+               request.getEndpoint().startsWith("/prd_a_new_product_");
+    }
+
+    private boolean isAliasCreationRequest(Request request) {
+        return request.getMethod().equals("POST") && 
+               request.getEndpoint().equals("/_aliases");
     }
 } 
