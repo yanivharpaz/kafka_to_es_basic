@@ -1,0 +1,91 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'org.example'
+version = '1.0-SNAPSHOT'
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+ext {
+    elasticsearchVersion = '6.8.0'
+    kafkaVersion = '3.5.1'
+    logbackVersion = '1.2.11'
+    log4jVersion = '2.17.1'  // Add this for Elasticsearch compatibility
+}
+
+dependencies {
+    // Elasticsearch dependencies
+    implementation "org.elasticsearch.client:elasticsearch-rest-high-level-client:${elasticsearchVersion}"
+    implementation "org.elasticsearch:elasticsearch:${elasticsearchVersion}"
+    implementation "org.elasticsearch.client:elasticsearch-rest-client:${elasticsearchVersion}"
+    implementation "org.elasticsearch.plugin:transport-netty4-client:${elasticsearchVersion}"
+    
+    // Kafka dependencies
+    implementation "org.apache.kafka:kafka-clients:${kafkaVersion}"
+    implementation "org.apache.kafka:connect-api:${kafkaVersion}"
+    
+    // Jackson for JSON processing
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.2'
+    
+    // Logging - both logback and log4j2 (needed for Elasticsearch)
+    implementation "ch.qos.logback:logback-classic:${logbackVersion}"
+    implementation "ch.qos.logback:logback-core:${logbackVersion}"
+    implementation 'org.slf4j:slf4j-api:1.7.36'
+    
+    // Required log4j2 dependencies for Elasticsearch
+    implementation "org.apache.logging.log4j:log4j-core:${log4jVersion}"
+    implementation "org.apache.logging.log4j:log4j-api:${log4jVersion}"
+    implementation "org.apache.logging.log4j:log4j-to-slf4j:${log4jVersion}"  // Bridge log4j2 to slf4j
+    
+    // Remove only slf4j-log4j12 to avoid conflicts
+    configurations.all {
+        exclude group: 'org.slf4j', module: 'slf4j-log4j12'
+    }
+    
+    // Test dependencies
+    testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+application {
+    mainClass = 'org.example.KafkaToElasticsearchConsumer'
+}
+
+// Remove the log4j system property since we're using logback
+applicationDefaultJvmArgs = []
+mainClassName = 'org.example.KafkaToElasticsearchConsumer'
+
+// Optional: Configure logging for tests
+test {
+    testLogging {
+        events "passed", "skipped", "failed"
+    }
+}
+
+// Optional: Create a fat JAR with all dependencies
+tasks.register('fatJar', Jar) {
+    archiveClassifier = 'all'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    
+    manifest {
+        attributes 'Main-Class': application.mainClass
+    }
+    
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    with jar
+}
