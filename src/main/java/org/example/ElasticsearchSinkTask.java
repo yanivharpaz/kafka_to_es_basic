@@ -3,25 +3,21 @@ package org.example;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.record.TimestampType;
-import java.util.Optional;
-
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.connect.sink.SinkTask;
-import org.example.config.KafkaConfig;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.kafka.connect.sink.SinkRecord;
+import org.example.config.KafkaConfig;
 import org.example.service.ElasticsearchService;
 import org.example.service.DlqService;
 import org.example.config.ElasticsearchConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Collection;
 import java.util.Map;
 import java.util.Optional;
 
 public class ElasticsearchSinkTask extends SinkTask {
     private static final Logger logger = LoggerFactory.getLogger(ElasticsearchSinkTask.class);
-    private static final int MAX_RETRIES = 3;
-    private static final long RETRY_BACKOFF_MS = 1000;
     private static final String DLQ_TOPIC = "my-topic-dlq";
 
     private ElasticsearchService elasticsearchService;
@@ -47,37 +43,22 @@ public class ElasticsearchSinkTask extends SinkTask {
         try {
             elasticsearchService.processSinkRecords(records);
         } catch (Exception e) {
-            logger.error("Batch processing failed, attempting individual record processing", e);
-            for (SinkRecord record : records) {
-                try {
-                    retryOrSendToDlq(record, e);
-                } catch (Exception recordError) {
-                    logger.error("Error processing record {}: {}", record.key(), recordError.getMessage());
-                }
-            }
+            logger.error("Batch processing failed, sending entire batch to DLQ", e);
+            sendBatchToDlq(records, e);
         }
     }
 
-    private void retryOrSendToDlq(SinkRecord record, Exception originalError) {
-        Exception lastException = originalError;
-
-        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    private void sendBatchToDlq(Collection<SinkRecord> records, Exception error) {
+        for (SinkRecord record : records) {
             try {
-                if (attempt > 0) {
-                    Thread.sleep(RETRY_BACKOFF_MS * attempt);
-                }
-                elasticsearchService.indexDocument(record.value().toString());
-                return;
-            } catch (Exception e) {
-                lastException = e;
-                logger.error("Retry attempt {} failed for record {}: {}",
-                        attempt + 1, record.key(), e.getMessage());
+                ConsumerRecord<String, String> consumerRecord = convertToConsumerRecord(record);
+                dlqService.sendToDlq(consumerRecord, error);
+            } catch (Exception dlqError) {
+                logger.error("Failed to send record to DLQ - Key: {}, Error: {}", 
+                    record.key(), dlqError.getMessage(), dlqError);
             }
         }
-
-        dlqService.sendToDlq(convertToConsumerRecord(record), lastException);
     }
-
 
     private ConsumerRecord<String, String> convertToConsumerRecord(SinkRecord record) {
         return new ConsumerRecord<>(
@@ -86,8 +67,8 @@ public class ElasticsearchSinkTask extends SinkTask {
                 record.kafkaOffset(),
                 record.timestamp(),
                 TimestampType.CREATE_TIME,
-                (int) -1,  // key size as int
-                (int) -1,  // value size as int
+                ConsumerRecord.NULL_SIZE,  // key size
+                ConsumerRecord.NULL_SIZE,  // value size
                 record.key() != null ? record.key().toString() : null,
                 record.value() != null ? record.value().toString() : null,
                 new RecordHeaders(),
@@ -104,4 +85,4 @@ public class ElasticsearchSinkTask extends SinkTask {
             logger.error("Error during shutdown: {}", e.getMessage());
         }
     }
-}
+} 

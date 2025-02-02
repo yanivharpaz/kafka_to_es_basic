@@ -148,26 +148,26 @@ public class ElasticsearchService implements AutoCloseable {
     }
 
     // Schedule periodic flush (optional, can be called in constructor if needed)
-    public void startPeriodicFlush() {
-        Thread flushThread = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    if (Instant.now().isAfter(lastFlushTime.plusMillis(flushIntervalMs))) {
-                        flushBatch();
-                    }
-                    Thread.sleep(Math.min(1000, flushIntervalMs / 2));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    System.err.println("Error in periodic flush: " + e.getMessage());
-                }
-            }
-        });
-        flushThread.setDaemon(true);
-        flushThread.setName("ES-Batch-Flush-Thread");
-        flushThread.start();
-    }
+//    public void startPeriodicFlush() {
+//        Thread flushThread = new Thread(() -> {
+//            while (!Thread.currentThread().isInterrupted()) {
+//                try {
+//                    if (Instant.now().isAfter(lastFlushTime.plusMillis(flushIntervalMs))) {
+//                        flushBatch();
+//                    }
+//                    Thread.sleep(Math.min(1000, flushIntervalMs / 2));
+//                } catch (InterruptedException e) {
+//                    Thread.currentThread().interrupt();
+//                    break;
+//                } catch (Exception e) {
+//                    System.err.println("Error in periodic flush: " + e.getMessage());
+//                }
+//            }
+//        });
+//        flushThread.setDaemon(true);
+//        flushThread.setName("ES-Batch-Flush-Thread");
+//        flushThread.start();
+//    }
 
     // For backward compatibility and single document indexing
     public void indexDocument(String message) throws IOException {
