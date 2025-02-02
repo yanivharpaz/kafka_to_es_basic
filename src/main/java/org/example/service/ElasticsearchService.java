@@ -34,7 +34,7 @@ public class ElasticsearchService implements AutoCloseable {
     private static final String INDEX_PREFIX = "prd_a_";
     
     // Batch configuration
-    private static final int DEFAULT_BATCH_SIZE = 1000;
+    private static final int DEFAULT_BATCH_SIZE = 10;
     private static final long DEFAULT_FLUSH_INTERVAL_MS = 5000; // 5 seconds
     private final int batchSize;
     private final long flushIntervalMs;
@@ -58,15 +58,16 @@ public class ElasticsearchService implements AutoCloseable {
         initializeAliasCache();
     }
 
-    private synchronized int getNextIndexNumber(String productType) {
-        int currentNumber = indexCounters.getOrDefault(productType, 0);
-        int nextNumber = currentNumber + 1;
-        indexCounters.put(productType, nextNumber);
-        return nextNumber;
-    }
+//    private synchronized int getNextIndexNumber(String productType) {
+//        int currentNumber = indexCounters.getOrDefault(productType, 0);
+//        int nextNumber = currentNumber + 1;
+//        indexCounters.put(productType, nextNumber);
+//        return nextNumber;
+//
+//    }
 
     private String getIndexName(String productType) {
-        return String.format("%s%s_%05d", INDEX_PREFIX, productType, getNextIndexNumber(productType));
+        return String.format("%s%s_%05d", INDEX_PREFIX, productType, 1);
     }
 
     private String getAliasName(String productType) {
@@ -88,7 +89,7 @@ public class ElasticsearchService implements AutoCloseable {
         }
     }
 
-    private void addToBatch(String message) throws IOException {
+    public void addToBatch(String message) throws IOException {
         ObjectMapper mapper = new ObjectMapper();
         try {
             JsonNode jsonNodes = mapper.readTree(message);
@@ -130,8 +131,9 @@ public class ElasticsearchService implements AutoCloseable {
         }
     }
 
-    private synchronized void flushBatch() throws IOException {
+    public void flushBatch() throws IOException {
         if (batchCount.get() > 0) {
+            System.out.println("** Starting batch flush");
             try {
                 BulkResponse bulkResponse = client.bulk(currentBatch, RequestOptions.DEFAULT);
                 if (bulkResponse.hasFailures()) {
