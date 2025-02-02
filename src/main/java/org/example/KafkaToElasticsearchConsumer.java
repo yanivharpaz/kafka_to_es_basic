@@ -11,10 +11,13 @@ import org.example.service.DlqService;
 import org.example.service.ElasticsearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.apache.kafka.connect.sink.SinkRecord;
 
 import java.io.IOException;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.List;
+import java.util.ArrayList;
 
 public class KafkaToElasticsearchConsumer {
     private static final Logger logger = LoggerFactory.getLogger(KafkaToElasticsearchConsumer.class);
@@ -83,16 +86,30 @@ public class KafkaToElasticsearchConsumer {
 
     private void processRecords(ConsumerRecords<String, String> records) {
         try {
+            List<SinkRecord> sinkRecords = new ArrayList<>();
+            
             for (ConsumerRecord<String, String> record : records) {
                 logger.info("Processing message - Topic: {}, Partition: {}, Offset: {}",
                         record.topic(), record.partition(), record.offset());
 
-                try {
-                    elasticsearchService.addToBatch(record.value());
-                } catch (Exception e) {
-                    logger.error("Error processing record: {}", record.value(), e);
-                    dlqService.sendToDlq(record, e);
-                }
+                // Convert to SinkRecord
+                SinkRecord sinkRecord = new SinkRecord(
+                    record.topic(),
+                    record.partition(),
+                    null, // keySchema
+                    record.key(),
+                    null, // valueSchema
+                    record.value(),
+                    record.offset(),
+                    record.timestamp(),
+                    record.timestampType()
+                );
+                sinkRecords.add(sinkRecord);
+            }
+
+            // Process batch of records
+            if (!sinkRecords.isEmpty()) {
+                elasticsearchService.processSinkRecords(sinkRecords);
             }
 
             // Commit offsets after processing the batch

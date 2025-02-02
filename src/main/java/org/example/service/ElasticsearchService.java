@@ -3,7 +3,7 @@ package org.example.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.JsonParseException;
-
+import org.apache.kafka.connect.sink.SinkRecord;
 
 import org.apache.http.util.EntityUtils;
 import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
@@ -14,24 +14,22 @@ import org.elasticsearch.client.*;
 import org.elasticsearch.client.indices.GetIndexRequest;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.example.model.IndexInfo;
-import org.apache.kafka.connect.sink.SinkRecord;
-import java.util.Collection;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.bulk.BulkResponse;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 
 public class ElasticsearchService implements AutoCloseable {
     private final RestHighLevelClient client;
     private final Map<String, String> aliasCache;
     private final Map<String, Integer> indexCounters;
-    private static final String INDEX_PREFIX = "prd_a_";
+    private static final String INDEX_PREFIX = "cfp_a_";
     
     // Batch configuration
     private static final int DEFAULT_BATCH_SIZE = 10;
@@ -57,14 +55,6 @@ public class ElasticsearchService implements AutoCloseable {
         this.lastFlushTime = Instant.now();
         initializeAliasCache();
     }
-
-//    private synchronized int getNextIndexNumber(String productType) {
-//        int currentNumber = indexCounters.getOrDefault(productType, 0);
-//        int nextNumber = currentNumber + 1;
-//        indexCounters.put(productType, nextNumber);
-//        return nextNumber;
-//
-//    }
 
     private String getIndexName(String productType) {
         return String.format("%s%s_%05d", INDEX_PREFIX, productType, 1);
@@ -152,6 +142,8 @@ public class ElasticsearchService implements AutoCloseable {
                 System.err.println("Error flushing batch: " + e.getMessage());
                 throw new IOException("Failed to flush batch", e);
             }
+            System.out.println("** batch flush complete");
+
         }
     }
 

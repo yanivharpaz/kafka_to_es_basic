@@ -26,21 +26,14 @@ public class ElasticsearchSinkTask extends SinkTask {
                         Integer.parseInt(props.getOrDefault("elasticsearch.port", "9200")), "http"));
         
         RestHighLevelClient client = new RestHighLevelClient(builder);
-        elasticsearchService = new ElasticsearchService(client);
+        int batchSize = Integer.parseInt(props.getOrDefault("batch.size", "10"));
+        long flushIntervalMs = Long.parseLong(props.getOrDefault("flush.interval.ms", "5000"));
+        elasticsearchService = new ElasticsearchService(client, batchSize, flushIntervalMs);
     }
 
     @Override
     public void put(Collection<SinkRecord> records) {
-        for (SinkRecord record : records) {
-            try {
-                if (record.value() != null) {
-                    elasticsearchService.indexDocument(record.value().toString());
-                }
-            } catch (Exception e) {
-                // Log error but continue processing other records
-                System.err.println("Error processing record: " + e.getMessage());
-            }
-        }
+        elasticsearchService.processSinkRecords(records);
     }
 
     @Override

@@ -31,7 +31,7 @@ dependencies {
     
     // Kafka dependencies
     implementation "org.apache.kafka:kafka-clients:${kafkaVersion}"
-    implementation "org.apache.kafka:connect-api:${kafkaVersion}"
+    implementation "org.apache.kafka:connect-api:${kafkaVersion}"  // Only need this for SinkRecord
     
     // Jackson for JSON processing
     implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.2'
@@ -90,4 +90,18 @@ tasks.register('fatJar', Jar) {
         configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
     }
     with jar
+}
+
+jar {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    
+    manifest {
+        attributes(
+            'Main-Class': 'org.example.KafkaToElasticsearchConsumer'
+        )
+    }
+    
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
 }
