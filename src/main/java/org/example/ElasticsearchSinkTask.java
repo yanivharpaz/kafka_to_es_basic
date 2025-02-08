@@ -61,18 +61,17 @@ public class ElasticsearchSinkTask extends SinkTask {
     }
 
     private ConsumerRecord<String, String> convertToConsumerRecord(SinkRecord record) {
-        return new ConsumerRecord<>(
-                record.topic(),
-                record.kafkaPartition(),
-                record.kafkaOffset(),
-                record.timestamp(),
-                TimestampType.CREATE_TIME,
-                ConsumerRecord.NULL_SIZE,  // key size
-                ConsumerRecord.NULL_SIZE,  // value size
-                record.key() != null ? record.key().toString() : null,
-                record.value() != null ? record.value().toString() : null,
-                new RecordHeaders(),
-                Optional.empty()
+        return new ConsumerRecord<String, String>(
+            record.topic(),
+            record.kafkaPartition(),
+            record.kafkaOffset(),
+            record.timestamp(),
+            record.timestampType(),
+            0L, // checksum
+            0, // serialized key size
+            0, // serialized value size
+            record.key() != null ? record.key().toString() : null,
+            record.value() != null ? record.value().toString() : null
         );
     }
 

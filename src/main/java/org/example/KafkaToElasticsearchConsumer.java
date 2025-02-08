@@ -3,95 +3,98 @@ package org.example;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.consumer.OffsetAndMetadata;
-import org.apache.kafka.common.TopicPartition;
-import org.example.config.ElasticsearchConfig;
 import org.example.config.KafkaConfig;
-import org.example.service.DlqService;
-import org.example.service.ElasticsearchService;
-
-import java.io.IOException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.kafka.connect.sink.SinkRecord;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Map;
 
 public class KafkaToElasticsearchConsumer {
-    private final KafkaConsumer<String, String> kafkaConsumer;
-    private final ElasticsearchService elasticsearchService;
-    private final DlqService dlqService;
-    
+    private static final Logger logger = LoggerFactory.getLogger(KafkaToElasticsearchConsumer.class);
+    private static final Duration POLL_TIMEOUT = Duration.ofMillis(100);
     private static final String SOURCE_TOPIC = "my-topic";
-    private static final String DLQ_TOPIC = "my-topic-dlq";
-    private static final int MAX_RETRIES = 3;
-    private static final long RETRY_BACKOFF_MS = 1000;
 
+    private final KafkaConsumer<String, String> consumer;
+    private final org.example.ElasticsearchSinkTask sinkTask;
+    private volatile boolean running = true;
+
+    // Constructor for production use
     public KafkaToElasticsearchConsumer() {
-        this.kafkaConsumer = KafkaConfig.createConsumer("kafka-to-elasticsearch-consumer");
-        this.elasticsearchService = new ElasticsearchService(ElasticsearchConfig.createClient());
-        this.dlqService = new DlqService(KafkaConfig.createProducer(), DLQ_TOPIC);
+        this(KafkaConfig.createConsumer("kafka-to-elasticsearch-consumer"));
     }
 
-    private void indexToElasticsearchWithRetry(ConsumerRecord<String, String> record) throws IOException {
-        Exception lastException = null;
-
-        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
-            try {
-                if (attempt > 0) {
-                    Thread.sleep(RETRY_BACKOFF_MS * attempt);
-                }
-                elasticsearchService.indexDocument(record.value());
-                return;
-            } catch (Exception e) {
-                lastException = e;
-                System.err.printf("Elasticsearch indexing attempt %d failed: %s%n",
-                        attempt + 1, e.getMessage());
-            }
-        }
-
-        if (lastException != null) {
-            dlqService.sendToDlq(record, lastException);
-        }
+    // Constructor for testing
+    public KafkaToElasticsearchConsumer(KafkaConsumer<String, String> consumer) {
+        this.consumer = consumer;
+        this.sinkTask = new org.example.ElasticsearchSinkTask();
+        
+        // Initialize the sink task
+        Map<String, String> props = new HashMap<>();
+        // Add any necessary configuration
+        props.put("elasticsearch.url", "http://localhost:9200");
+        this.sinkTask.start(props);
+        
+        this.consumer.subscribe(Collections.singletonList(SOURCE_TOPIC));
     }
 
-    public void start() {
+    private void processRecords(ConsumerRecords<String, String> records) {
         try {
-            kafkaConsumer.subscribe(Collections.singletonList(SOURCE_TOPIC));
+            List<SinkRecord> sinkRecords = new ArrayList<>();
+            
+            for (ConsumerRecord<String, String> record : records) {
+                logger.info("Processing message - Topic: {}, Partition: {}, Offset: {}",
+                        record.topic(), record.partition(), record.offset());
 
-            while (true) {
-                ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
+                SinkRecord sinkRecord = new SinkRecord(
+                    record.topic(),
+                    record.partition(),
+                    null, // keySchema
+                    record.key(),
+                    null, // valueSchema
+                    record.value(),
+                    record.offset(),
+                    record.timestamp(),
+                    record.timestampType()
+                );
+                sinkRecords.add(sinkRecord);
+            }
 
-                for (ConsumerRecord<String, String> record : records) {
-                    System.out.printf("Processing message - Topic: %s, Partition: %d, Offset: %d%n",
-                            record.topic(), record.partition(), record.offset());
+            if (!sinkRecords.isEmpty()) {
+                sinkTask.put(sinkRecords);
+            }
 
-                    try {
-                        indexToElasticsearchWithRetry(record);
-                        kafkaConsumer.commitSync(Collections.singletonMap(
-                                new TopicPartition(record.topic(), record.partition()),
-                                new OffsetAndMetadata(record.offset() + 1)
-                        ));
-                    } catch (Exception e) {
-                        System.err.println("Failed to process message: " + e.getMessage());
-                        e.printStackTrace();
-                    }
+            consumer.commitSync();
+        } catch (Exception e) {
+            logger.error("Error processing batch: {}", e.getMessage(), e);
+        }
+    }
+
+    public void run() {
+        try {
+            while (running) {
+                ConsumerRecords<String, String> records = consumer.poll(POLL_TIMEOUT);
+                
+                if (!records.isEmpty()) {
+                    processRecords(records);
                 }
             }
         } finally {
-            cleanup();
+            sinkTask.stop();
+            consumer.close();
         }
     }
 
-    private void cleanup() {
-        try {
-            kafkaConsumer.close();
-            elasticsearchService.close();
-        } catch (IOException e) {
-            System.err.println("Error during cleanup: " + e.getMessage());
-            e.printStackTrace();
-        }
+    public void shutdown() {
+        running = false;
     }
 
     public static void main(String[] args) {
         KafkaToElasticsearchConsumer consumer = new KafkaToElasticsearchConsumer();
-        consumer.start();
+        consumer.run();
     }
 }

@@ -24,6 +24,8 @@ import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.bulk.BulkResponse;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.time.Instant;
+import com.google.common.annotations.VisibleForTesting;
+import java.time.Duration;
 
 public class ElasticsearchService implements AutoCloseable {
     private final RestHighLevelClient client;
@@ -39,6 +41,11 @@ public class ElasticsearchService implements AutoCloseable {
     private final BulkRequest currentBatch;
     private final AtomicInteger batchCount;
     private volatile Instant lastFlushTime;
+
+    private final Map<String, StringBuilder> batches = new ConcurrentHashMap<>();
+    private final Map<String, AtomicInteger> documentCounters = new ConcurrentHashMap<>();
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ElasticsearchService(RestHighLevelClient client) {
         this(client, DEFAULT_BATCH_SIZE, DEFAULT_FLUSH_INTERVAL_MS);
@@ -80,46 +87,33 @@ public class ElasticsearchService implements AutoCloseable {
         }
     }
 
-    public void addToBatch(String message) throws IOException {
-        ObjectMapper mapper = new ObjectMapper();
-        try {
-            JsonNode jsonNodes = mapper.readTree(message);
-            
-            if (jsonNodes.isArray()) {
-                for (JsonNode node : jsonNodes) {
-                    addDocumentToBatch(node);
-                }
-            } else {
-                addDocumentToBatch(jsonNodes);
-            }
-        } catch (JsonParseException e) {
-            System.err.println("Invalid JSON message: " + message);
-            throw new IOException("Failed to parse JSON message", e);
-        }
+    public void addToBatch(String document) throws IOException {
+        JsonNode node = objectMapper.readTree(document);
+        addDocumentToBatch(node);
     }
 
-    private boolean shouldFlush() {
-        return batchCount.get() >= batchSize || 
-               Instant.now().isAfter(lastFlushTime.plusMillis(flushIntervalMs));
+    @VisibleForTesting
+    boolean shouldFlush(String productType) {
+        return documentCounters.getOrDefault(productType, new AtomicInteger(0)).get() >= batchSize;
     }
 
-    private void addDocumentToBatch(JsonNode node) throws IOException {
-        String productType = node.has("ProductType") ?
-                node.get("ProductType").asText().toLowerCase() : "unknown";
-        String aliasName = getAliasName(productType);
-
+    @VisibleForTesting
+    void addDocumentToBatch(JsonNode document) throws IOException {
+        String productType = document.has("ProductType") ? 
+            document.get("ProductType").asText().toLowerCase() : "unknown";
+        
         ensureIndexAndAliasExist(productType);
-
-        IndexRequest indexRequest = new IndexRequest(aliasName, "_doc")
-                .id(UUID.randomUUID().toString())
-                .source(node.toString(), XContentType.JSON);
-
-        currentBatch.add(indexRequest);
-        batchCount.incrementAndGet();
-
-        if (shouldFlush()) {
-            flushBatch();
+        
+        // Add to batch
+        String documentString = document.toString();
+        if (!batches.containsKey(productType)) {
+            batches.put(productType, new StringBuilder());
         }
+        batches.get(productType).append(documentString).append("\n");
+        
+        // Increment document counter
+        documentCounters.computeIfAbsent(productType, k -> new AtomicInteger(0))
+                       .incrementAndGet();
     }
 
     public void flushBatch() throws IOException {
@@ -176,7 +170,8 @@ public class ElasticsearchService implements AutoCloseable {
         flushBatch(); // Immediately flush for single document indexing
     }
 
-    private void initializeAliasCache() {
+    @VisibleForTesting
+    void initializeAliasCache() {
         try {
             Response response = client.getLowLevelClient()
                     .performRequest(new Request("GET", "/_alias"));
@@ -328,5 +323,16 @@ public class ElasticsearchService implements AutoCloseable {
                 client.close();
             }
         }
+    }
+
+    // Package-private for testing
+    Map<String, StringBuilder> getBatches() {
+        return this.batches;
+    }
+
+    // Package-private for testing
+    int getDocumentCount(String productType) {
+        AtomicInteger counter = this.documentCounters.get(productType);
+        return counter != null ? counter.get() : 0;
     }
 }
