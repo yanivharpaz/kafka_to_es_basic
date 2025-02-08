@@ -3,7 +3,7 @@ package org.example.service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.JsonParseException;
-
+import org.apache.kafka.connect.sink.SinkRecord;
 
 import org.apache.http.util.EntityUtils;
 import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
@@ -14,27 +14,25 @@ import org.elasticsearch.client.*;
 import org.elasticsearch.client.indices.GetIndexRequest;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.example.model.IndexInfo;
-import org.apache.kafka.connect.sink.SinkRecord;
-import java.util.Collection;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.bulk.BulkResponse;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 
 public class ElasticsearchService implements AutoCloseable {
     private final RestHighLevelClient client;
     private final Map<String, String> aliasCache;
     private final Map<String, Integer> indexCounters;
-    private static final String INDEX_PREFIX = "prd_a_";
+    private static final String INDEX_PREFIX = "cfp_a_";
     
     // Batch configuration
-    private static final int DEFAULT_BATCH_SIZE = 1000;
+    private static final int DEFAULT_BATCH_SIZE = 10;
     private static final long DEFAULT_FLUSH_INTERVAL_MS = 5000; // 5 seconds
     private final int batchSize;
     private final long flushIntervalMs;
@@ -45,6 +43,7 @@ public class ElasticsearchService implements AutoCloseable {
     public ElasticsearchService(RestHighLevelClient client) {
         this(client, DEFAULT_BATCH_SIZE, DEFAULT_FLUSH_INTERVAL_MS);
     }
+
 
     public ElasticsearchService(RestHighLevelClient client, int batchSize, long flushIntervalMs) {
         this.client = client;
@@ -58,15 +57,8 @@ public class ElasticsearchService implements AutoCloseable {
         initializeAliasCache();
     }
 
-    private synchronized int getNextIndexNumber(String productType) {
-        int currentNumber = indexCounters.getOrDefault(productType, 0);
-        int nextNumber = currentNumber + 1;
-        indexCounters.put(productType, nextNumber);
-        return nextNumber;
-    }
-
     private String getIndexName(String productType) {
-        return String.format("%s%s_%05d", INDEX_PREFIX, productType, getNextIndexNumber(productType));
+        return String.format("%s%s_%05d", INDEX_PREFIX, productType, 1);
     }
 
     private String getAliasName(String productType) {
@@ -88,7 +80,7 @@ public class ElasticsearchService implements AutoCloseable {
         }
     }
 
-    private void addToBatch(String message) throws IOException {
+    public void addToBatch(String message) throws IOException {
         ObjectMapper mapper = new ObjectMapper();
         try {
             JsonNode jsonNodes = mapper.readTree(message);
@@ -130,8 +122,9 @@ public class ElasticsearchService implements AutoCloseable {
         }
     }
 
-    private synchronized void flushBatch() throws IOException {
+    public void flushBatch() throws IOException {
         if (batchCount.get() > 0) {
+            System.out.println("** Starting batch flush");
             try {
                 BulkResponse bulkResponse = client.bulk(currentBatch, RequestOptions.DEFAULT);
                 if (bulkResponse.hasFailures()) {
@@ -150,30 +143,32 @@ public class ElasticsearchService implements AutoCloseable {
                 System.err.println("Error flushing batch: " + e.getMessage());
                 throw new IOException("Failed to flush batch", e);
             }
+            System.out.println("** batch flush complete");
+
         }
     }
 
     // Schedule periodic flush (optional, can be called in constructor if needed)
-    public void startPeriodicFlush() {
-        Thread flushThread = new Thread(() -> {
-            while (!Thread.currentThread().isInterrupted()) {
-                try {
-                    if (Instant.now().isAfter(lastFlushTime.plusMillis(flushIntervalMs))) {
-                        flushBatch();
-                    }
-                    Thread.sleep(Math.min(1000, flushIntervalMs / 2));
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                } catch (Exception e) {
-                    System.err.println("Error in periodic flush: " + e.getMessage());
-                }
-            }
-        });
-        flushThread.setDaemon(true);
-        flushThread.setName("ES-Batch-Flush-Thread");
-        flushThread.start();
-    }
+//    public void startPeriodicFlush() {
+//        Thread flushThread = new Thread(() -> {
+//            while (!Thread.currentThread().isInterrupted()) {
+//                try {
+//                    if (Instant.now().isAfter(lastFlushTime.plusMillis(flushIntervalMs))) {
+//                        flushBatch();
+//                    }
+//                    Thread.sleep(Math.min(1000, flushIntervalMs / 2));
+//                } catch (InterruptedException e) {
+//                    Thread.currentThread().interrupt();
+//                    break;
+//                } catch (Exception e) {
+//                    System.err.println("Error in periodic flush: " + e.getMessage());
+//                }
+//            }
+//        });
+//        flushThread.setDaemon(true);
+//        flushThread.setName("ES-Batch-Flush-Thread");
+//        flushThread.start();
+//    }
 
     // For backward compatibility and single document indexing
     public void indexDocument(String message) throws IOException {
